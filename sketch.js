@@ -866,7 +866,68 @@ window.mousePressed = function() {
     }
 };
 
+// ============================================================
+// Viewport / floor sync
+// ============================================================
+// The world is sized to the LIVE canvas height: surfaceY = height*(29/40) and
+// the corridor walls are spaced by 6*height. The background (with its painted
+// red floor line at row 29/40) is redrawn to fill `height` every frame, but the
+// PHYSICS floor (surfaceY, the invisible `ground` body, the walls/doors) was
+// computed once at boot. Going fullscreen / resizing the window changes
+// `height`, so the painted floor moves down while the physics floor stays put —
+// and the player (resting on the stale physics floor) appears to float above
+// the visible floor. Fix: whenever the height changes, re-derive the floor
+// geometry to the new height and shift the live entities so they keep resting
+// on it. (Vertical world coords == screen coords here: camera.y is height/2 and
+// zoom is 1, so surfaceY in world space lands exactly on screen-y surfaceY.)
+let _layoutH = -1;
+
+function repositionFloor() {
+    surfaceY = height * (29 / 40);
+    window.surfaceY = surfaceY;
+    const doorHeight = 200;
+    if (ground) ground.y = surfaceY + 37;
+    for (let i = 0; i < walls.length; i++) {
+        const wx = (i * 6) * height - width * 0.5;
+        if (walls[i]) {
+            walls[i].x = wx;
+            walls[i].y = (surfaceY - doorHeight) * 0.5;
+            walls[i].h = surfaceY - doorHeight;
+        }
+        if (doors[i]) {
+            doors[i].x = wx;
+            doors[i].y = surfaceY - doorHeight * 0.5;
+        }
+    }
+}
+
+function shiftWorldEntities(delta) {
+    if (!delta) return;
+    if (player) player.y += delta;
+    for (const g of [crates, turrets, turretShots, pdata.activeAttacks]) {
+        if (!g) continue;
+        for (const s of g) {
+            s.y += delta;
+            if (s.restY !== undefined) s.restY += delta;   // keep rest/hover anchor on the floor
+        }
+    }
+    if (levelDoor) levelDoor.y += delta;
+}
+
+// Call every gameplay frame; cheap no-op unless the canvas height changed.
+function syncFloorToViewport() {
+    if (height === _layoutH) return;
+    const prevSurfaceY = surfaceY;
+    repositionFloor();
+    if (_layoutH >= 0) shiftWorldEntities(surfaceY - prevSurfaceY);
+    _layoutH = height;
+}
+
 function resetGameplayPositions() {
+    // Make sure the floor matches the current window height before placing the
+    // player (handles the case where the user resized during the title screen).
+    repositionFloor();
+
     // Player back to spawn
     player.x = 0;
     player.y = 300;
@@ -898,6 +959,7 @@ function resetGameplayPositions() {
 
     // Camera back to start
     camera.x = width / 2;
+    _layoutH = height;   // floor is freshly laid out for this height
 }
 function restartGame() {
     // Re-enable the sprite-draw pass that gameover turned off.
@@ -1035,6 +1097,9 @@ q5.update = function () {
 // Gameplay update (the old q5.update body)
 // ============================================================
 function updatePlaying() {
+    // Keep the floor aligned with the live canvas height (fullscreen/resize).
+    syncFloorToViewport();
+
     // Background scroll
     const positionAlongCorridor = camera.x % (height * 6);
     image(corridorBG, (3 * height - width * 0.5) - positionAlongCorridor, 0, height * 6, height);
@@ -1158,6 +1223,7 @@ function updatePlaying() {
 //   3. "youwon"     big green "YOU WON", then back to the start screen
 // ============================================================
 function updateEnding() {
+    syncFloorToViewport();   // keep the floor aligned if the window is resized mid-cutscene
     if (endingPhase === "approach")   return endingApproachUpdate();
     if (endingPhase === "typewriter") return endingTypewriterUpdate();
     if (endingPhase === "youwon")     return endingYouWonUpdate();
@@ -1799,7 +1865,7 @@ function makeTurret(tx, ty, flying) {
         let pf = 0;
         t.everyFrame.hover = { duration: Infinity, f: (s) => {
             pf++;
-            s.y = ty + Math.sin(phase + pf * 0.05) * 22;     // gentle airborne bob
+            s.y = s.restY + Math.sin(phase + pf * 0.05) * 22;  // gentle airborne bob (restY tracks floor on resize)
         }};
     } else {
         riseTurret(t);                  // ground turret rise + power-on
